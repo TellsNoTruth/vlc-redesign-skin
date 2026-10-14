@@ -103,30 +103,24 @@ class Skin:
         (self.dir / "theme.xml").write_text(xml, encoding="utf-8")
 
 
-    def _sheets(self, width=2048, wide=2048):
-        """Pack every image into a few sprite sheets and return their Bitmap elements, each
-        image a SubBitmap. A .vlt is unpacked to a temp folder on every start and each
-        image is decoded separately: with ~470 single files that took VLC 8 s to start,
-        against 0.3 s for its default skin."""
+    def _sheets(self, wide=2048):
+        """Pack every image into sprite sheets and return their Bitmap elements, each image a
+        SubBitmap. A .vlt is unpacked to a temp folder on every start and each image is
+        decoded separately: with ~470 single files VLC took 8 s to show this skin, against
+        0.3 s for its default skin.
+
+        Images wider than `wide` (the seek fill strips) get a sheet of their own, so they do
+        not make the main sheet that wide."""
         img_dir = self.dir / "img"
         img_dir.mkdir(parents=True, exist_ok=True)
-        normal = sorted((b for b in self._images if self._images[b].width <= wide),
-                        key=lambda b: (-self._images[b].height, -self._images[b].width, b))
-        wides = sorted((b for b in self._images if self._images[b].width > wide), key=lambda b: b)
+        normal = [b for b in self._images if self._images[b].width <= wide]
+        wides = sorted(b for b in self._images if self._images[b].width > wide)
 
-        sheets = []  # [(placements {bid: (x, y)}, w, h)]
-        place, x, y, row_h = {}, 0, 0, 0
-        for bid in normal:
-            w, h = self._images[bid].size
-            if x + w > width:                      # next shelf
-                x, y, row_h = 0, y + row_h + 1, 0
-            if y + h > 4096 and place:             # next sheet
-                sheets.append((place, width, y + row_h))
-                place, x, y, row_h = {}, 0, 0, 0
-            place[bid] = (x, y)
-            x, row_h = x + w + 1, max(row_h, h)
-        if place:
-            sheets.append((place, width, y + row_h))
+        sheets = []
+        if normal:
+            # try a few widths and keep the one that wastes least
+            sheets.append(min((skyline(normal, self._images, w) for w in (1024, 1280, 1536, 2048)),
+                              key=lambda r: r[1] * r[2]))
         if wides:
             place, y = {}, 0
             for bid in wides:
@@ -138,13 +132,53 @@ class Skin:
         for n, (place, w, h) in enumerate(sheets):
             sheet = Image.new("RGBA", (w, h), (0, 0, 0, 0))
             el = E("Bitmap", id=f"sheet{n}", file=f"img/sheet{n}.png", alphacolor=ALPHA)
-            for bid, (x, y) in place.items():
+            for bid, (x, y) in sorted(place.items(), key=lambda kv: (kv[1][1], kv[1][0])):
                 img = self._images[bid]
                 sheet.paste(img, (x, y))
                 el.add(E("SubBitmap", id=bid, x=x, y=y, width=img.width, height=img.height))
             sheet.save(img_dir / f"sheet{n}.png", optimize=True)
             out.append(el)
         return out
+
+
+def skyline(ids, images, width, pad=1):
+    """Skyline bottom-left packing: each image, tallest first, goes where its bottom edge
+    sits highest on the sheet. Returns ({id: (x, y)}, width, height)."""
+    sky = [[0, 0, width + pad]]                 # contiguous [x, top, w] segments
+    place = {}
+    for bid in sorted(ids, key=lambda b: (-images[b].height, -images[b].width, b)):
+        w, h = images[bid].width + pad, images[bid].height + pad
+        best = None
+        for i, (x, _, _) in enumerate(sky):
+            top, covered, j = 0, 0, i
+            while covered < w and j < len(sky):
+                top, covered, j = max(top, sky[j][1]), covered + sky[j][2], j + 1
+            if covered < w:
+                break
+            if best is None or (top + h, x) < (best[0] + h, best[1]):
+                best = (top, x)
+        top, x = best
+        place[bid] = (x, top)
+        segs = []
+        for sx, sy, sw in sky:
+            if sx + sw <= x or sx >= x + w:
+                segs.append([sx, sy, sw])
+                continue
+            if sx < x:
+                segs.append([sx, sy, x - sx])
+            if sx + sw > x + w:
+                segs.append([x + w, sy, sx + sw - x - w])
+        segs.append([x, top + h, w])
+        segs.sort()
+        sky = []
+        for seg in segs:
+            if sky and sky[-1][1] == seg[1]:
+                sky[-1][2] += seg[2]
+            else:
+                sky.append(seg)
+    height = max(place[b][1] + images[b].height for b in place)
+    used_w = max(place[b][0] + images[b].width for b in place)
+    return place, used_w, height
 
 
 class Layout:
@@ -229,13 +263,13 @@ class Layout:
 
     def slider(self, value, x, y, points, up, over=None, down=None, w=None, h=None, thickness=None,
                tip=None, anchor="tl", visible=None, background=None, hint="sld"):
-        """background: (bitmap id, number of vertically stacked frames) for a SliderBackground."""
+        """background: (bitmap id, columns, rows) of a SliderBackground's frame grid."""
         el = E("Slider", id=self._id(hint), **self._place(x, y, anchor), width=w, height=h,
                up=up, over=over, down=down, points=points, thickness=thickness, value=value,
                tooltiptext=tip, visible=visible)
         if background:
-            el.add(E("SliderBackground", id=self._id("bg"), image=background[0], nbhoriz=1,
-                     nbvert=background[1]))
+            el.add(E("SliderBackground", id=self._id("bg"), image=background[0], nbhoriz=background[1],
+                     nbvert=background[2]))
         self._top.add(el)
 
     def video(self, x, y, w, h, anchor="fill", visible=None, autoresize=False):

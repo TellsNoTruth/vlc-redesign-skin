@@ -129,7 +129,7 @@ def rows_font(dst, size, row):
     capitals of `size`-pixel text sit in the middle of a `row`-pixel row. The glyphs are
     untouched; the family is renamed "Inter Rows", as a modified font should be (OFL)."""
     from fontTools.ttLib import TTFont
-    f = TTFont(FONT_FILES["regular"])
+    f = TTFont(FONT_FILES["regular"], recalcTimestamp=False)   # same bytes every build
     upm, asc = f["head"].unitsPerEm, f["hhea"].ascent
     target = round((row - f["OS/2"].sCapHeight * size / upm) / 2)
     asc_px = asc * size / upm
@@ -231,63 +231,6 @@ class Icons:
         return out
 
 
-# --- bigger artwork ----------------------------------------------------------
-
-def cone(size):
-    """The VLC cone, drawn large for the empty video area."""
-    s = size
-    img = blank(s, s)
-    orange, orange_dark, white = "#F18A1C", "#C9630B", "#F4F4F4"
-    body = [(s * .42, s * .07), (s * .58, s * .07), (s * .80, s * .80), (s * .20, s * .80)]
-    img.alpha_composite(poly(s, s, body, orange))
-    # two white bands, clipped to the cone by recomputing the slanted edges
-    def band(y0, y1):
-        def xl(y): return s * .42 - (y - s * .07) * (.22 / .73)
-        def xr(y): return s - xl(y)
-        return [(xl(y0), y0), (xr(y0), y0), (xr(y1), y1), (xl(y1), y1)]
-    img.alpha_composite(poly(s, s, band(s * .30, s * .40), white))
-    img.alpha_composite(poly(s, s, band(s * .53, s * .63), white))
-    img.alpha_composite(rrect(s, s, (s * .10, s * .78, s * .90, s * .90), s * .04, orange_dark))
-    img.alpha_composite(rrect(s, s, (s * .14, s * .78, s * .86, s * .82), 0, "#00000030"))
-    return img
-
-
-# A double note in the pixel style of the Figma "music" tiles (Player - Music, Home).
-NOTE = [
-    "................",
-    "....##########..",
-    "....#........#..",
-    "....##########..",
-    "....#........#..",
-    "....#........#..",
-    "....#........#..",
-    "....#........#..",
-    "....#........#..",
-    "..###......###..",
-    ".#..#.....#..#..",
-    ".#..#.....#..#..",
-    "..##.......##...",
-    "................",
-    "................",
-    "................",
-]
-
-
-def note_tile(size, bg, fg):
-    """Placeholder cover art: a pixel-art note on a rounded tile."""
-    cell = size // 16
-    img = rrect(size, size, (0, 0, size, size), size * .06, bg)
-    ink = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-    for y, row in enumerate(NOTE):
-        for x, ch in enumerate(row):
-            if ch == "#":
-                ink.putpixel((x, y), rgba(fg))
-    ink = ink.resize((16 * cell, 16 * cell), Image.Resampling.NEAREST)
-    off = (size - 16 * cell) // 2
-    img.alpha_composite(ink, (off, off + cell))
-    return img
-
-
 # --- slider artwork ----------------------------------------------------------
 
 def fill_strip(reach, height, color, tail=0):
@@ -300,7 +243,7 @@ def fill_strip(reach, height, color, tail=0):
     return img
 
 
-def volume_frames(theme, n=89):
+def volume_frames(theme, cols=9, rows=10):
     """SliderBackground frames for the wedge-shaped volume control (Figma 'volume', 244:184).
 
     Frame k shows the wedge filled to k/(n-1) of its width. The dark theme uses the
@@ -326,11 +269,12 @@ def volume_frames(theme, n=89):
                     px[x, y] = (*rgba(theme["vol_track"])[:3], al)
         empty, full = empty_l, lifted
     w, h = empty.size
-    sheet = blank(w, h * n)
+    n = cols * rows
+    sheet = blank(w * cols, h * rows)    # row-major, the order skins2 reads frames in
     for k in range(n):
         frame = empty.copy()
         end = round(k * (w - 1) / (n - 1))
         if k:
             frame.paste(full.crop((0, 0, end + 1, h)), (0, 0))
-        sheet.paste(frame, (0, k * h))
+        sheet.paste(frame, ((k % cols) * w, (k // cols) * h))
     return sheet

@@ -14,24 +14,30 @@ Every image is drawn knowing the surface it will sit on (`on=`), because skins2 
 blend partly transparent pixels with what is beneath them; see paint.solidify.
 """
 import argparse
+import gzip
 import shutil
 import tarfile
 import tempfile
 from pathlib import Path
+
+import sys
 
 from skinlib import paint as P
 from skinlib.palette import DARK, LIGHT, THEMES
 from skinlib.skin import Layout, Skin
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "tools"))
+import check_theme  # noqa: E402  (tools/ is not a package)
+
 NAME = "VLC-Redesign"
 DIST = ROOT / "dist"
 OUT = DIST / NAME
 ICONS = P.Icons()
 
-# How far a progress fill reaches left of its slider value (see progress()).
-# It must be longer than the widest track any window can have.
-REACH = 6000
+# The widest seek track whose fill can follow the handle (see progress()): a track this
+# wide belongs to a 5,190 px wide window. Longer only costs memory in VLC.
+MAX_TRACK = 4500
 
 STOPPED, ACTIVE = "vlc.isStopped", "not vlc.isStopped"
 ART_VIEW = "not vlc.isStopped and not vlc.hasVout"
@@ -177,9 +183,10 @@ def progress(L, art, *, x0, x1, y, h, inset, r_track, r_fill, handle, anchor_l, 
                 x1 - cap, y, anchor="br" if anchor_s == "bottom" else anchor_l, hint=f"{name}track")
 
     # 1. the fill: a cursor whose centre column sits on the value and whose strip ends at
-    #    the handle's right edge. In a fixed-size layout it only has to reach the window's
-    #    left edge from the far end of the track; a stretching track can grow, so REACH.
-    reach = REACH if anchor_s != "tl" else hi + 1
+    #    the handle's right edge. skins2 centres a cursor on the value, so the strip is the
+    #    left half of an image whose right half is empty. It must reach back to the start of
+    #    the track (the mask hides any more); a stretching track can grow up to MAX_TRACK.
+    reach = (MAX_TRACK if anchor_s != "tl" else length) + hw // 2 + 1
 
     def strip():
         img = P.blank(2 * reach + 1, fh)
@@ -232,7 +239,7 @@ def control_bar(L, art, oy, W, *, fixed, bg, last):
                "Mute", "Unmute", x=W - 327, y=oy + 13, anchor=A("br"))
     frames = art.get("volume.frames", lambda: P.volume_frames(t), on="chrome")
     L.slider("volume", W - 292, oy + 13, "(0,27),(87,27)", up=art.nothing(), w=88, h=28,
-             tip="Volume: $V%", anchor=A("br"), background=(frames, 89), hint="volume")
+             tip="Volume: $V%", anchor=A("br"), background=(frames, 9, 10), hint="volume")
 
     L.toggle("eqwin.isVisible", art.icon_button("audio", 30, 32, 3, 4),
                art.icon_button("audio", 30, 32, 3, 4, active=True), "eqwin.show()", "eqwin.hide()",
@@ -293,53 +300,31 @@ def top_bar(L, art, kind):
     L.button(art.window_button("close", danger=True), W - 42, 8, "vlc.quit()", "Quit VLC", anchor="tr")
 
 
-def empty_art(t, w=420, h=170):
-    """What the stage shows when nothing plays: the cone and a hint."""
-    img = P.blank(w, h)
-    img.alpha_composite(P.cone(104), ((w - 104) // 2, 0))
-    P.text(img, w // 2, 140, "Double-click to open media, or drop files here", 14, t["text_dim"], align="center")
-    return img
-
-
-def placeholder_cover(t, size):
-    """Shown when the media has no cover: a pixel note like the Figma music tiles."""
-    return P.note_tile(size, *(("#26332A", "#3BD16F") if t is DARK else ("#9DB3A3", "#16803F")))
-
-
 def stage(L, art, x0, y0, x1, y1, outside):
-    """The video area (Figma: the rounded rectangle inset under the top bar).
-
-    Stopped: an empty state. Audio without video: the cover and the title, as in
-    Figma 'Player - Music' (its blurred backdrop needs translucency skins2 lacks).
-    Video: the video. outside: palette key of the colour around each rounded corner,
+    """The video area (Figma: the rounded rectangle inset under the top bar). Black whenever
+    there is nothing to show, as in VLC. Audio without video shows its cover and title, as in
+    Figma 'Player - Music' (whose blurred backdrop needs translucency skins2 lacks); without
+    a cover, just the title. outside: palette key of the colour around each rounded corner,
     in tl, tr, br, bl order."""
     t = art.t
     w, h = x1 - x0, y1 - y0
-
-    L.image(art.px("stage"), x0, y0, w, h, anchor="fill", resize="scale", visible=STOPPED,
-            action2="dialogs.fileSimple()", hint="empty")
-    with L.panel(x0, y0, w, h, anchor="fill"):
-        L.image(art.get("stage.empty", lambda: empty_art(t), "stage"), (w - 420) // 2, (h - 170) // 2 - 10,
-                keep="xy", visible=STOPPED, action2="dialogs.fileSimple()", hint="emptyart")
-
-    L.image(art.px("stage_art"), x0, y0, w, h, anchor="fill", resize="scale", visible=ART_VIEW, hint="artbg")
-    L.image(art.get("cover.placeholder", lambda: placeholder_cover(t, 512), "stage_art"),
-            x0 + 60, y0 + 48, w - 120, h - 48 - 120, anchor="fill", resize="scale2", art=True,
+    black = art.px("stage")
+    L.image(black, x0, y0, w, h, anchor="fill", resize="scale", action2="dialogs.fileSimple()", hint="stage")
+    # the media's cover; with none, its fallback is the black pixel, so nothing shows
+    L.image(black, x0 + 60, y0 + 48, w - 120, h - 48 - 120, anchor="fill", resize="scale2", art=True,
             visible=ART_VIEW, hint="cover")
     f20 = L.skin.font(20)
-    L.text("$N", x0 + 20, y1 - 62 - P.ascent(20), w - 40, f20, t["text_hi"], align="center",
+    L.text("$N", x0 + 20, y1 - 62 - P.ascent(20), w - 40, f20, t["stage_text"], align="center",
            anchor="bottom", visible=ART_VIEW)
 
     L.video(x0, y0, w, h, visible="vlc.hasVout")
 
-    # rounded corners: patches of the outside colour, edged for whichever view is showing
+    # rounded corners: patches of the outside colour laid over the stage's corners
     r = 8
     spots = ((x0, y0, "tl"), (x1 - r, y0, "tr"), (x1 - r, y1 - r, "br"), (x0, y1 - r, "bl"))
-    for inside, visible in (("stage", STOPPED), ("stage_art", ART_VIEW)):
-        for (cx, cy, which), out in zip(spots, outside):
-            img = lambda which=which, out=out: P.corner(r, t[out], which)
-            L.image(art.get(f"corner.{which}.{r}.{out}", img, inside), cx, cy, anchor=which,
-                    visible=visible, hint="corner")
+    for (cx, cy, which), out in zip(spots, outside):
+        img = lambda which=which, out=out: P.corner(r, t[out], which)
+        L.image(art.get(f"corner.{which}.{r}.{out}", img, "stage"), cx, cy, anchor=which, hint="corner")
 
 
 def repeat_controls(L, art, x, y, on):
@@ -425,13 +410,6 @@ def sidebar(L, art):
                scrollbar=(410, ty, f"(2,{th - 20}),(2,20)", thumb, thumb_over))
 
 
-def grip(t):
-    img = P.solid(12, 12, t["chrome"])
-    for x, y in ((8, 4), (4, 8), (8, 8)):
-        img.alpha_composite(P.ellipse(12, 12, (x, y, x + 2, y + 2), t["text_dim"]))
-    return img
-
-
 def full_layout(skin, win, t, side):
     """The main player, 1280 x 720 by default and resizable. side=True adds the sidebar."""
     kind = "side" if side else "full"
@@ -460,7 +438,7 @@ def full_layout(skin, win, t, side):
     chrome = art.px("chrome")
     L.image(chrome, W - 5, 0, 5, H - 12, anchor="right", resize="scale", action="resizeE", hint="gripE")
     L.image(chrome, 0, H - 4, W - 12, 4, anchor="bottom", resize="scale", action="resizeS", hint="gripS")
-    L.image(art.get("grip.se", lambda: grip(t)), W - 12, H - 12, anchor="br", action="resizeSE", hint="gripSE")
+    L.image(chrome, W - 12, H - 12, 12, 12, anchor="br", resize="scale", action="resizeSE", hint="gripSE")
 
 
 # --- mini player (Figma "Miniplayer", 970:3090) ---------------------------------------
@@ -475,12 +453,7 @@ def mini_layout(skin, win, t):
     bg_img.alpha_composite(P.rrect(W, H, (1, 1, W - 1, H - 1), 0, t["chrome"]))
     bg_img.alpha_composite(P.rrect(W, H, (vx, vy, vx + vw, vy + vh), 6, t["stage"]))
     L.image(art.get("mini.bg", bg_img), 0, 0, action="move", hint="bg")
-    L.image(art.get("mini.cone", lambda: P.cone(72), "stage"), vx + (vw - 72) // 2, vy + (vh - 72) // 2,
-            visible=STOPPED, action2="dialogs.fileSimple()")
-    L.image(art.get("mini.artbg", lambda: P.rrect(vw, vh, (0, 0, vw, vh), 6, t["stage_art"]), "chrome"),
-            vx, vy, visible=ART_VIEW)
-    L.image(art.get("cover.placeholder.mini", lambda: placeholder_cover(t, 192), "stage_art"),
-            vx, vy + 8, vw, vh - 16, resize="scale2", art=True, visible=ART_VIEW, hint="cover")
+    L.image(art.px("stage"), vx, vy + 8, vw, vh - 16, resize="scale2", art=True, visible=ART_VIEW, hint="cover")
     L.video(vx, vy, vw, vh, anchor="tl", visible="vlc.hasVout")
 
     progress(L, art, x0=vx, x1=vx + vw, y=227, h=12, inset=2, r_track=4, r_fill=3, handle=(4, 8, 2),
@@ -489,7 +462,6 @@ def mini_layout(skin, win, t):
 
     f14 = L.skin.font(14)
     L.text("$N", 12, 266 - P.ascent(14), 367, f14, t["text_hi"], visible=ACTIVE)
-    L.text("Nothing playing", 12, 266 - P.ascent(14), 367, f14, t["text_dim"], visible=STOPPED)
 
     y = 284
     L.button(art.icon_button("previous"), 8, y, "playlist.previous()", "Previous")
@@ -666,9 +638,20 @@ def build(start="dark_full", show_eq=False, preview_fsc=False):
         fsc_layout(skin, fsc, t)
 
     skin.write()
+    problems = check_theme.check(OUT / "theme.xml")
+    if problems:
+        raise SystemExit("theme.xml has problems:\n  " + "\n  ".join(problems))
     vlt = DIST / f"{NAME}.vlt"
-    with tarfile.open(vlt, "w:gz") as tar:
-        tar.add(OUT, arcname=NAME)
+    # dist/ is committed, so the archive is made byte-for-byte reproducible: no timestamps,
+    # owners or ordering that change from build to build
+    def plain(info):
+        info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+        return info
+    with open(vlt, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz, \
+            tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        tar.add(OUT, arcname=NAME, recursive=False, filter=plain)
+        for path in sorted(OUT.rglob("*")):
+            tar.add(path, arcname=f"{NAME}/{path.relative_to(OUT).as_posix()}", recursive=False, filter=plain)
     images = len(list((OUT / "img").glob("*.png")))
     print(f"{OUT / 'theme.xml'}: {images} images")
     print(f"{vlt}: {vlt.stat().st_size // 1024} KiB")

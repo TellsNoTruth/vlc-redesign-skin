@@ -25,7 +25,7 @@ To try a build once without changing any VLC settings:
 | Figma | In the skin |
 | --- | --- |
 | Player (247:445), Controls (491:1779) | Main window: 40 px top bar, rounded video area, 54 px control bar with seek fill, wedge volume (0–200 %, 100 % in the middle, as VLC maps it), equalizer, subtitles, playback and playlist buttons. Resizable. |
-| Player - Music (4767:23726) | With audio and no video, the cover is centred above the title. A pixel-art note tile stands in when there is no cover. |
+| Player - Music (4767:23726) | With audio and no video, the cover is centred above the title; without a cover, just the title. With nothing to show, the video area is black, as in VLC. |
 | Player with sidebar (187:328), sidebar (848:1996) | Playlist layout: a rail (open files, folder, disc, network stream, media info, preferences) and a panel with shuffle, repeat (all / one), sort, load, save, remove, add, and the playlist itself, with the playing item in orange. |
 | Player - Light (2425:13624) | Every layout also comes in light. The "..." menu switches theme, and the equalizer and fullscreen bar follow. |
 | Miniplayer (970:3090) | 391 × 339 mini player: video or cover, progress, title, controls and time. |
@@ -68,9 +68,35 @@ skins2 is VLC 3's skin engine. It draws the player's own windows and nothing els
 - VLC's own default skin (`skins/default.vlt` in VLC's install folder, a gzipped tar) is the
   most reliable example of the format; it is not copied here, as it isn't ours to redistribute.
 - `tools/startup_time.py`: times how long VLC takes to show a skin's window.
+- `tools/sheet_stats.py`: sizes of the sprite sheets and how much of each is used.
 - `tools/run_skin.py`: launches VLC with the skin (`--ignore-config`, so your settings are not
   touched), drives it through the rc interface and saves screenshots of VLC's windows only.
   `build.py --start light_side --show-eq --preview-fsc` sets up the views to capture.
+- The build is reproducible: building twice gives byte-identical files in `dist/`, so a
+  commit only shows `dist/` changing when the skin did.
+
+## Checking it works
+
+1. **Every build** runs `tools/check_theme.py` and stops if it finds a problem. skins2 itself
+   only logs a warning and leaves the control dead, so the checker makes sure every image,
+   font, action, variable and text token is one skins2 knows (lists from VLC 3.0's source),
+   and that every control lies inside its layout.
+2. **`python tools/smoke_test.py`** runs the skin in VLC (`--ignore-config`) and checks 33
+   things across the dark and light player, the sidebar, the mini player and the equalizer:
+   play/pause, seeking and volume by clicking, mute, next/previous, the music cover, the
+   equalizer window and its toggle, shuffle and the repeat cycle, sidebar open/close,
+   maximize/restore, expanding the mini player and quitting. It clicks by posting mouse
+   messages to VLC's window, so the real cursor never moves, reads VLC's state from its HTTP
+   interface, and fails on any skins2 warning in VLC's log. Screenshots of each step land in
+   `shots/smoke/`. Create its media first with `python tools/make_testmedia.py` (needs ffmpeg).
+3. **By hand**, what the test cannot reach:
+   - the "..." and playback menus, including the theme switch and the mini player item
+     (native menus cannot be clicked by posted messages)
+   - fullscreen and its floating bar, which appears on mouse movement
+   - dragging the window, resizing it from the right and bottom edges, and minimizing
+   - dragging files onto the window, tooltips, and scrolling a long playlist
+   - the subtitles button and the dialogs it and the rail open
+   - that the equalizer sliders change the sound
 
 None of this is in the skins2 documentation. Items 1–3 and 8 were measured in VLC 3.0.24, item 9 was seen in use;
 items 4–7 come from VLC's 3.0 source (`modules/gui/skins2`) and are confirmed by the skin working:
@@ -85,9 +111,11 @@ items 4–7 come from VLC's 3.0 source (`modules/gui/skins2`) and are confirmed 
    change notice instead of reading the variable, so one that starts out of step stays wrong.
    `vlc.isMute` did. Every on/off control here is two buttons whose `visible` reads the variable.
 3. **Sliders have no fill.** The seek bar fill is the cursor of a second slider on the same
-   curve: a 12,001 px strip that ends at the handle. An opaque image covers the part that
-   overhangs left of the track, and the real handle slider sits on top, where it takes clicks.
-   See `progress()` in `build.py`. The volume wedge uses 89 frames of a SliderBackground instead.
+   curve: a strip that ends at the handle. skins2 centres a cursor on the value, so the strip
+   is the left half of an image whose right half is empty, which is why the second sprite sheet
+   is 9,011 px wide and half transparent. An opaque image covers the part that overhangs left of
+   the track, and the real handle slider sits on top, where it takes clicks. See `progress()`
+   in `build.py`. The volume wedge uses 90 frames of a SliderBackground instead, laid out 9 x 10.
 4. **A window opens on the layout defined last**, not the first.
 5. **A slider's size comes from its curve.** It is the largest x and y of the points plus one,
    counted from zero. A SliderBackground is scaled by the ratio of the control's size to that
@@ -103,7 +131,9 @@ items 4–7 come from VLC's 3.0 source (`modules/gui/skins2`) and are confirmed 
    start and decodes each image on its own. With ~470 separate PNGs, VLC took 8 s to show the
    skin; VLC's default skin takes 0.3 s. `Skin` now packs all images into two sprite sheets
    (as `SubBitmap`s), with identical images stored once, and the skin starts in 0.4 s.
-   `tools/startup_time.py` measures this.
+   `tools/startup_time.py` measures this. The sheets are packed tightly (skyline packing,
+   93% of the main sheet used): VLC keeps them decoded in memory, and a first, simpler
+   packing left 62% empty and cost 27 MB.
 9. **Clicks only hit opaque pixels.** A button whose normal image is a bare icon on a transparent
    background can be clicked only on the icon's strokes (three dots, for "..."). Button images
    are therefore filled with the colour of the surface they sit on (`Art.get(opaque=True)`).
