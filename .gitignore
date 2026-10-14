@@ -1,0 +1,4 @@
+# tools/run_skin.py output and generated test media
+shots/
+testmedia/
+__pycache__/
