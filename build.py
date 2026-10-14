@@ -288,8 +288,10 @@ def top_bar(L, art, kind):
 
     f14 = L.skin.font(14)
     y = 25 - P.ascent(14)
-    L.text("$N", 330, y, W - 660, f14, t["text"], align="center", anchor="top", visible=ACTIVE)
-    L.text("VLC Media Player", 330, y, W - 660, f14, t["text"], align="center", anchor="top", visible=STOPPED)
+    # centred, clear of the left group (ends at 251) and the window buttons (start at W - 150);
+    # a title too long to fit scrolls, as VLC skins do, rather than being cut off at both ends
+    L.text("$N", 300, y, W - 600, f14, t["text"], align="center", anchor="top", visible=ACTIVE, scrolling="auto")
+    L.text("VLC Media Player", 300, y, W - 600, f14, t["text"], align="center", anchor="top", visible=STOPPED)
 
     L.button(art.window_button("minimize"), W - 150, 8, "vlc.minimize()", "Minimize", anchor="tr")
     L.button(art.window_button("maximize"), W - 114, 8, "main.maximize()", "Maximize", anchor="tr",
@@ -314,7 +316,7 @@ def stage(L, art, x0, y0, x1, y1, outside):
     L.image(black, x0 + 60, y0 + 48, w - 120, h - 48 - 120, anchor="fill", resize="scale2", art=True,
             visible=ART_VIEW, hint="cover")
     f20 = L.skin.font(20)
-    L.text("$N", x0 + 20, y1 - 62 - P.ascent(20), w - 40, f20, t["stage_text"], align="center",
+    L.text("$N", x0 + 20, y1 - 62 - P.ascent(20), w - 40, f20, t["stage_text"], align="center", scrolling="auto",
            anchor="bottom", visible=ART_VIEW)
 
     L.video(x0, y0, w, h, visible="vlc.hasVout")
@@ -414,7 +416,7 @@ def full_layout(skin, win, t, side):
     """The main player, 1280 x 720 by default and resizable. side=True adds the sidebar."""
     kind = "side" if side else "full"
     W, H = 1280, 720
-    L = Layout(skin, win, lid(t, kind), W, H, min_size=(1040 if side else 720, 420))
+    L = Layout(skin, win, lid(t, kind), W, H, min_size=(1040 if side else 860, 420))     # 860: room for a 174 px seek track
     art = Art(skin, t)
     L.image(art.px("chrome"), 0, 0, W, H, anchor="fill", resize="scale", action="move", hint="bg")
     if side:
@@ -461,7 +463,7 @@ def mini_layout(skin, win, t):
              name="miniseek")
 
     f14 = L.skin.font(14)
-    L.text("$N", 12, 266 - P.ascent(14), 367, f14, t["text_hi"], visible=ACTIVE)
+    L.text("$N", 12, 266 - P.ascent(14), 367, f14, t["text_hi"], visible=ACTIVE, scrolling="auto")
 
     y = 284
     L.button(art.icon_button("previous"), 8, y, "playlist.previous()", "Previous")
@@ -618,7 +620,8 @@ def build(start="dark_full", show_eq=False, preview_fsc=False):
         shutil.rmtree(OUT)
     rows = P.rows_font(Path(tempfile.mkdtemp()) / "InterRows-Regular.ttf", ROW_TEXT, ROW)
     skin = Skin("VLC Redesign", "Design by Juxtopposed, skinned by build.py", OUT,
-                {**P.FONT_FILES, "rows": rows}, P.FONT_LICENSE)
+                {**P.FONT_FILES, "rows": rows}, P.FONT_LICENSE,
+                webpage="https://github.com/mamogh/vlc-redesign-skin")
     menus(skin)
 
     # skins2 starts each window on the layout added last

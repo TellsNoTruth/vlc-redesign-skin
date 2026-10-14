@@ -10,7 +10,7 @@ python build.py
 ```
 
 This regenerates `dist/VLC-Redesign.vlt` and the same files unpacked in `dist/VLC-Redesign/`.
-It needs Python 3 with Pillow and fontTools. The skin bundles Inter, the design's typeface, from `fonts/`
+It needs Python 3 with Pillow and fontTools (lxml too, for full DTD validation). The skin bundles Inter, the design's typeface, from `fonts/`
 (SIL Open Font License, see `fonts/Inter-LICENSE.txt`), because skins2 only loads fonts shipped
 inside the skin.
 
@@ -77,21 +77,28 @@ skins2 is VLC 3's skin engine. It draws the player's own windows and nothing els
 
 ## Checking it works
 
-1. **Every build** runs `tools/check_theme.py` and stops if it finds a problem. skins2 itself
+1. **Every build** runs `tools/check_theme.py` and stops if it finds a problem. It validates
+   theme.xml against VLC's own `skin.dtd` (fully with lxml installed, a smaller check without)
+   and checks ids are unique. skins2 itself
    only logs a warning and leaves the control dead, so the checker makes sure every image,
    font, action, variable and text token is one skins2 knows (lists from VLC 3.0's source),
    and that every control lies inside its layout.
-2. **`python tools/smoke_test.py`** runs the skin in VLC (`--ignore-config`) and checks 33
+2. **`python tools/smoke_test.py`** runs the skin in VLC (`--ignore-config`) and checks 37
    things across the dark and light player, the sidebar, the mini player and the equalizer:
    play/pause, seeking and volume by clicking, mute, next/previous, the music cover, the
    equalizer window and its toggle, shuffle and the repeat cycle, sidebar open/close,
-   maximize/restore, expanding the mini player and quitting. It clicks by posting mouse
-   messages to VLC's window, so the real cursor never moves, reads VLC's state from its HTTP
+   maximize/restore, expanding the mini player, the "..." menu's playlist, mini player and
+   theme items, and quitting. It clicks by posting mouse
+   messages to VLC's window (and keystrokes to its menus), so the real cursor never moves, reads VLC's state from its HTTP
    interface, and fails on any skins2 warning in VLC's log. Screenshots of each step land in
    `shots/smoke/`. Create its media first with `python tools/make_testmedia.py` (needs ffmpeg).
-3. **By hand**, what the test cannot reach:
-   - the "..." and playback menus, including the theme switch and the mini player item
-     (native menus cannot be clicked by posted messages)
+   Leave the PC alone while it runs (about two minutes): native menus close as soon as another
+   window takes focus, so using the PC meanwhile makes the menu checks fail.
+3. **`python tools/edge_cases.py`** saves screenshots to look over: the player shrunk to its
+   minimum size, a title too long to fit (it scrolls, as VLC skins do), and a 30-item
+   playlist.
+4. **By hand**, what the test cannot reach:
+   - the rest of the "..." menu and the playback menu
    - fullscreen and its floating bar, which appears on mouse movement
    - dragging the window, resizing it from the right and bottom edges, and minimizing
    - dragging files onto the window, tooltips, and scrolling a long playlist

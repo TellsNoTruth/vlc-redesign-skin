@@ -44,11 +44,64 @@ IMAGE_ATTRS = ("image", "up", "down", "over", "up1", "down1", "over1", "up2", "d
                "bgimage", "itemimage", "openimage", "closedimage")
 
 
+# VLC's own definition of the format; VideoLAN's skin guide says a skin that breaks it may
+# not load. Checked when VLC is installed in the usual place.
+VLC_DTD = Path(r"C:\Program Files\VideoLAN\VLC\skins\skin.dtd")
+
+
+def dtd_problems(root, dtd_path=VLC_DTD, theme_path=None):
+    """Validate against VLC's DTD. With lxml this is full validation (element order and
+    counts included); without it, a smaller check: every element declared, inside a parent
+    that allows it, with only declared attributes and all the #REQUIRED ones."""
+    if not dtd_path.exists():
+        return []
+    try:
+        from lxml import etree
+    except ImportError:
+        etree = None
+    if etree and theme_path:
+        dtd = etree.DTD(str(dtd_path))
+        if dtd.validate(etree.parse(str(theme_path))):
+            return []
+        return sorted({f"DTD: line {e.line}: {e.message}" for e in dtd.error_log.filter_from_errors()})
+    text = re.sub(r"<!--.*?-->", "", dtd_path.read_text(encoding="utf-8"), flags=re.S)
+    children = {name: set(re.findall(r"[A-Za-z]\w*", spec)) - {"EMPTY"}
+                for name, spec in re.findall(r"<!ELEMENT\s+(\w+)\s+(.*?)>", text, re.S)}
+    attrs = {name: dict(re.findall(r'(\w+)\s+CDATA\s+(#REQUIRED|#IMPLIED|"[^"]*")', body))
+             for name, body in re.findall(r"<!ATTLIST\s+(\w+)(.*?)>", text, re.S)}
+    problems = []
+    for parent in root.iter():
+        for el in parent:
+            if el.tag not in children.get(parent.tag, ()):
+                problems.append(f"DTD: <{el.tag}> is not allowed inside <{parent.tag}>")
+    for el in root.iter():
+        declared = attrs.get(el.tag, {})
+        where = f"DTD: <{el.tag} id={el.get('id')!r}>"
+        for a in el.attrib:
+            if a not in declared:
+                problems.append(f"{where} has undeclared attribute {a}")
+        for a, default in declared.items():
+            if default == "#REQUIRED" and a not in el.attrib:
+                problems.append(f"{where} lacks required attribute {a}")
+    return sorted(set(problems))
+
+
 def check(theme_path):
     theme_path = Path(theme_path)
     root = ET.parse(theme_path).getroot()
-    errors = []
+    errors = dtd_problems(root, theme_path=theme_path)
     err = errors.append
+
+    # ids skins2 keeps in one map per kind must be unique across the whole theme
+    seen = {}
+    for el in root.iter():
+        kind = {"Bitmap": "bitmap", "SubBitmap": "bitmap", "Font": "font", "Window": "window",
+                "Layout": "layout", "PopupMenu": "popup"}.get(el.tag, "control")
+        if el.get("id") and el.tag not in ("ThemeInfo", "SliderBackground"):
+            key = (kind, el.get("id"))
+            if key in seen:
+                err(f"{kind} id {el.get('id')} is used twice")
+            seen[key] = el
 
     bitmaps = {}
     for b in root.iter("Bitmap"):

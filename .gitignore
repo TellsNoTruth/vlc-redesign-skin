@@ -2,3 +2,5 @@
 shots/
 testmedia/
 __pycache__/
+# a VLC log captured for debugging
+vlc-debug.log

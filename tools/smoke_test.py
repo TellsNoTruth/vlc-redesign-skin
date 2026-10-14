@@ -9,10 +9,15 @@ the effect through VLC's HTTP interface or the window's pixels. Each step's scre
 to shots/smoke/ for a look-over. Exits 1 if any check fails. Rebuilds the default skin at
 the end.
 
+Leave the PC alone while it runs (about two minutes): native menus close when another
+window takes focus, so using the PC meanwhile breaks the menu checks.
+
 Click positions follow the layouts in build.py at their default sizes (1280 x 720 player,
 391 x 339 mini player, 400 x 496 equalizer); move a control there and update it here.
 """
 import base64
+import ctypes
+import ctypes.wintypes as wt
 import json
 import socket
 import subprocess
@@ -23,6 +28,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_skin import VLC, print_window, user32, windows_of  # noqa: E402
+
+# menu handles are 64-bit pointers; ctypes would otherwise truncate them to int
+user32.SendMessageW.restype = ctypes.c_void_p
+user32.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.GetMenuItemCount.argtypes = [ctypes.c_void_p]
+user32.GetMenuState.argtypes = [ctypes.c_void_p, wt.UINT, wt.UINT]
+user32.GetMenuStringW.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.c_wchar_p, ctypes.c_int, wt.UINT]
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "shots" / "smoke"
@@ -141,6 +153,57 @@ class Vlc:
         check(f"{self.scenario}: no skins2 errors or warnings in VLC's log", not bad, "; ".join(bad[:3]))
 
 
+def menu_item(v, label):
+    """Open the top bar's "..." menu and choose the item called `label`, by posting
+    keystrokes to the native menu: Down until that item is highlighted, then Enter.
+    Returns None when chosen, else why not."""
+    def open_menu():
+        found = []
+
+        @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        def cb(hwnd, _):
+            owner, cls = wt.DWORD(), ctypes.create_unicode_buffer(32)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            user32.GetClassNameW(hwnd, cls, 32)
+            if owner.value == v.proc.pid and cls.value == "#32768" and user32.IsWindowVisible(hwnd):
+                found.append(hwnd)
+            return True
+        user32.EnumWindows(cb, 0)
+        return found[0] if found else None
+
+    menu = None
+    for _ in range(3):                  # a click that lands while a layout is switching can be lost
+        v.click(51 + 14, 20, settle=0.2)
+        deadline = time.time() + 1.5
+        while not menu and time.time() < deadline:
+            time.sleep(0.1)
+            menu = open_menu()
+        if menu:
+            break
+    if not menu:
+        return "the menu did not open"
+    hmenu = user32.SendMessageW(menu, 0x01E1, 0, 0)          # MN_GETHMENU
+
+    def highlighted():
+        for i in range(user32.GetMenuItemCount(hmenu)):
+            if user32.GetMenuState(hmenu, i, 0x400) & 0x80:   # MF_BYPOSITION, MF_HILITE
+                buf = ctypes.create_unicode_buffer(128)
+                user32.GetMenuStringW(hmenu, i, buf, 128, 0x400)
+                return buf.value.split("\t")[0]
+        return None
+    seen = []
+    for _ in range(30):
+        user32.PostMessageW(menu, 0x100, 0x28, 0)            # WM_KEYDOWN, VK_DOWN
+        time.sleep(0.12)
+        seen.append(highlighted())
+        if seen[-1] == label:
+            user32.PostMessageW(menu, 0x100, 0x0D, 0)        # WM_KEYDOWN, VK_RETURN
+            time.sleep(1.2)
+            return None
+    user32.PostMessageW(menu, 0x100, 0x1B, 0)                # VK_ESCAPE: close it again
+    return f"never highlighted; saw {seen[:6]}"
+
+
 def build(start):
     subprocess.run([sys.executable, str(ROOT / "build.py"), "--start", start], check=True,
                    stdout=subprocess.DEVNULL)
@@ -232,6 +295,22 @@ def full_player():
     v.click(W - 50 + 15, bar - 2)                  # bar playlist button closes the sidebar
     px = v.shot("closed-sidebar").getpixel((300, 600))
     check("playlist button closes the sidebar", not near(px, PANEL["dark"], 4), f"pixel {px}")
+
+    # the "..." menu
+    why = menu_item(v, "Show Playlist")
+    px = v.shot("menu-playlist").getpixel((300, 600))
+    check("menu: Show Playlist opens the sidebar layout", near(px, PANEL["dark"], 4), why or f"pixel {px}")
+    v.click(W - 50 + 15, bar - 2)
+    why = menu_item(v, "Mini Player")
+    check("menu: Mini Player opens the mini player", v.size() == (391, 339), why or f"{v.size()}")
+    v.shot("menu-mini")
+    v.click(336, 298, settle=1.5)                  # and back to the full player
+    why = menu_item(v, "Light Theme")
+    px = v.shot("menu-light").getpixel((5, 300))
+    check("menu: Light Theme switches theme", near(px, (0xAB, 0xAB, 0xAB), 4), why or f"pixel {px}")
+    why = menu_item(v, "Dark Theme")
+    px = v.shot("menu-dark").getpixel((5, 300))
+    check("menu: Dark Theme switches back", near(px, (0x1B, 0x1B, 0x1B), 4), why or f"pixel {px}")
 
     v.click(W - 114 + 18, 20)                      # maximize
     time.sleep(.5)

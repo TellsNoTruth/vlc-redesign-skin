@@ -33,11 +33,12 @@ ANCHORS = {
 
 
 class Skin:
-    def __init__(self, name, author, outdir, font_files, font_license=None):
+    def __init__(self, name, author, outdir, font_files, font_license=None, webpage=""):
         self.name, self.author = name, author
         self.dir = Path(outdir)
         self.font_files = font_files  # weight -> path of a .ttf to bundle
         self.font_license = font_license
+        self.webpage = webpage
         self.fonts, self.menus, self.windows = [], [], []
         self._images = {}        # bitmap id -> image, packed into sheets by write()
         self._aliases = {}       # requested id -> id of an identical image already registered
@@ -93,7 +94,7 @@ class Skin:
         for path in [*self.font_files.values(), *([self.font_license] if self.font_license else [])]:
             shutil.copy2(path, fonts_dir / Path(path).name)
         theme = E("Theme", version="2.0", tooltipfont="defaultfont", magnet="15", alpha="255", movealpha="255")
-        theme.add(E("ThemeInfo", name=self.name, author=self.author, email="", webpage=""))
+        theme.add(E("ThemeInfo", name=self.name, author=self.author, email="", webpage=self.webpage))
         theme.add(E("Font", id="defaultfont", file=f"fonts/{Path(self.font_files['regular']).name}", size=12))
         theme.add(*self.fonts, *self._sheets(), *self.menus, *self.windows)
         xml = ('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'
