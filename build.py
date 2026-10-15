@@ -16,11 +16,10 @@ blend partly transparent pixels with what is beneath them; see paint.solidify.
 import argparse
 import gzip
 import shutil
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
-
-import sys
 
 from skinlib import paint as P
 from skinlib.palette import DARK, LIGHT, THEMES
@@ -41,6 +40,7 @@ MAX_TRACK = 4500
 
 STOPPED, ACTIVE = "vlc.isStopped", "not vlc.isStopped"
 ART_VIEW = "not vlc.isStopped and not vlc.hasVout"
+MAIN_KINDS = ("full", "side", "mini")
 
 
 def lid(t, kind):
@@ -52,10 +52,10 @@ def other(t):
     return LIGHT if t is DARK else DARK
 
 
-def switch_theme(t, kind):
+def switch_theme(t, kind, fsc_id="fullscreenController"):
     o = other(t)
     return (f"main.setLayout({lid(o, kind)});eqwin.setLayout({lid(o, 'eq')});"
-            f"fullscreenController.setLayout({lid(o, 'fsc')})")
+            f"{fsc_id}.setLayout({lid(o, 'fsc')})")
 
 
 class Art:
@@ -97,7 +97,8 @@ class Art:
             img.alpha_composite(ICONS.tint(icon, t[color]), (ix, iy))
             return img
         fg = ("accent", "accent_hover", "accent_down") if active else ("icon", "icon_hover", "icon_down")
-        return self.states(f"ib.{icon}.{w}x{h}.{ix}.{iy}{'.on' if active else ''}", draw,
+        rk = f".r{r}" if r != 6 else ""
+        return self.states(f"ib.{icon}.{w}x{h}.{ix}.{iy}{rk}{'.on' if active else ''}", draw,
                            ((None, fg[0]), ("hover_bg", fg[1]), ("down_bg", fg[2])), on)
 
     def accent_button(self, icon, w, h, r=6, on="chrome"):
@@ -108,7 +109,8 @@ class Art:
             img = P.rrect(w, h, (0, 0, w, h), r, t[bg])
             img.alpha_composite(ICONS.tint(icon, t["on_accent"]), ((w - 24) // 2, (h - 24) // 2))
             return img
-        return self.states(f"ab.{icon}.{w}x{h}", draw, (("accent",), ("accent_hover",), ("accent_down",)), on)
+        rk = f".r{r}" if r != 6 else ""
+        return self.states(f"ab.{icon}.{w}x{h}{rk}", draw, (("accent",), ("accent_hover",), ("accent_down",)), on)
 
     def window_button(self, icon, danger=False, on="chrome"):
         """Title-bar buttons (36 x 24). Close turns red on hover, as on Windows."""
@@ -123,9 +125,11 @@ class Art:
         over_bg = t["close_hover"] if danger else t["hover_bg"]
         over_fg = "#FFFFFF" if danger else t["icon_hover"]
         down_bg = P.mix(t["close_hover"], "#000000", .15) if danger else t["down_bg"]
-        return self.states(f"wb.{icon}", draw, ((None, t["icon"]), (over_bg, over_fg), (down_bg, over_fg)), on)
+        return self.states(f"wb.{icon}{'.danger' if danger else ''}", draw,
+                           ((None, t["icon"]), (over_bg, over_fg), (down_bg, over_fg)), on)
 
-    def labelled_button(self, key, icon, label, w, h, ix, iy, tx, base, size, on, colors=("icon", "icon_hover", "icon_down")):
+    def labelled_button(self, key, icon, label, w, h, ix, iy, tx, base, size, on,
+                        colors=("icon", "icon_hover", "icon_down")):
         """An icon followed by text, e.g. the top bar's 'Open media'."""
         t = self.t
 
@@ -137,9 +141,10 @@ class Art:
             return P.text(img, tx, base, label, size, t[color])
         return self.states(key, draw, ((None, colors[0]), ("hover_bg", colors[1]), ("down_bg", colors[2])), on)
 
-    def handle(self, w, h, r, colors, on, key):
+    def handle(self, w, h, r, colors, on):
         t = self.t
-        return self.states(f"{key}.{w}x{h}", lambda c: P.rrect(w, h, (0, 0, w, h), r, t[c]),
+        key = f"handle.{w}x{h}.r{r}.{'.'.join(colors)}"
+        return self.states(key, lambda c: P.rrect(w, h, (0, 0, w, h), r, t[c]),
                            tuple((c,) for c in colors), on)
 
     def nothing(self):
@@ -149,7 +154,7 @@ class Art:
 def progress(L, art, *, x0, x1, y, h, inset, r_track, r_fill, handle, anchor_l, anchor_s,
              bg, on="chrome", handle_on="fill", fill_key="fill",
              handle_keys=("handle", "handle_hover", "accent_down"),
-             value="time", tip="$T / $D", visible=ACTIVE, draw_track=True, name="seek"):
+             value="time", tip="$T / $D", visible=ACTIVE, draw_track=True, name="seek", mask_id=None):
     """A track with a fill that follows the slider value, as in the Figma seek bar.
 
     skins2 sliders have no fill, so this stacks three things:
@@ -174,12 +179,19 @@ def progress(L, art, *, x0, x1, y, h, inset, r_track, r_fill, handle, anchor_l, 
 
     if draw_track:
         cap = r_track
-        whole = lambda: P.rrect(cap * 3, h, (0, 0, cap * 3, h), r_track, t["track"])
-        L.image(art.get(f"{name}.cap.l.{h}.{r_track}", lambda: whole().crop((0, 0, cap, h)), on),
+        caps_img = None
+
+        def get_caps():
+            nonlocal caps_img
+            if caps_img is None:
+                caps_img = P.rrect(cap * 3, h, (0, 0, cap * 3, h), r_track, t["track"])
+            return caps_img
+
+        L.image(art.get(f"track.cap.l.{h}.{r_track}", lambda: get_caps().crop((0, 0, cap, h)), on),
                 x0, y, anchor=anchor_l, hint=f"{name}track")
-        L.image(art.get(f"{name}.mid.{h}", lambda: P.solid(1, h, t["track"])), x0 + cap, y,
+        L.image(art.get(f"track.mid.{h}", lambda: P.solid(1, h, t["track"])), x0 + cap, y,
                 w=x1 - x0 - 2 * cap, h=h, resize="scale", anchor=anchor_s, hint=f"{name}track")
-        L.image(art.get(f"{name}.cap.r.{h}.{r_track}", lambda: whole().crop((cap * 2, 0, cap * 3, h)), on),
+        L.image(art.get(f"track.cap.r.{h}.{r_track}", lambda: get_caps().crop((cap * 2, 0, cap * 3, h)), on),
                 x1 - cap, y, anchor="br" if anchor_s == "bottom" else anchor_l, hint=f"{name}track")
 
     # 1. the fill: a cursor whose centre column sits on the value and whose strip ends at
@@ -198,25 +210,26 @@ def progress(L, art, *, x0, x1, y, h, inset, r_track, r_fill, handle, anchor_l, 
 
     # 2. the mask over the overflow left of the track, with the fill's rounded start
     fy = cy - fh // 2
+    cw = lo - x0 + max(r_track, r_fill) + 4
 
     def mask():
-        w = x0 + inset + 40
-        img = bg(0, y, w, y + h)
-        img.alpha_composite(P.rrect(w, h, (x0, 0, w + 40, h), r_track, t["track"]))
-        img.alpha_composite(P.rrect(w, h, (x0 + inset, inset, w + 40, h - inset), r_fill, t[fill_key]))
+        img = bg(0, y, lo, y + h)
+        if draw_track:
+            img.alpha_composite(P.rrect(cw, h, (0, 0, cw + r_track, h), r_track, t["track"]), (x0, 0))
+        img.alpha_composite(P.rrect(cw, h, (inset, inset, cw + r_fill, h - inset), r_fill, t[fill_key]), (x0, 0))
         return img.crop((0, fy - y, lo, fy - y + fh))
-    L.image(art.skin.bitmap(f"{L.id}.{name}.mask", mask), 0, fy, anchor=anchor_l, visible=visible,
+    L.image(art.skin.bitmap(mask_id or f"{L.id}.{name}.mask", mask), 0, fy, anchor=anchor_l, visible=visible,
             hint=f"{name}mask")
 
     # 3. the interactive handle, on the same curve but centred on its own height
-    up, over, down = art.handle(hw, hh, hr, handle_keys, handle_on, key=f"{name}.handle")
+    up, over, down = art.handle(hw, hh, hr, handle_keys, handle_on)
     L.slider(value, lo, cy - hh // 2, f"(0,{hh // 2}),({length},{hh // 2})", up=up, over=over, down=down,
              thickness=max(h // 2, hh // 2), tip=tip, anchor=anchor_s, visible=visible, hint=name)
 
 
 # --- the control bar (Figma "Controls", 491:1779) ------------------------------------
 
-def control_bar(L, art, oy, W, *, fixed, bg, last):
+def control_bar(L, art, oy, W, *, fixed, bg, last, mask_id=None):
     """The 54 px bar along the bottom. Positions are those of the Figma component: the left
     group pinned left, the right group pinned right, the seek track stretching between.
     last(x, y, anchor) draws the rightmost button."""
@@ -226,24 +239,24 @@ def control_bar(L, art, oy, W, *, fixed, bg, last):
     base = oy + 33 - P.ascent(16)   # the Figma digits sit on y = 33 of the bar
 
     progress(L, art, x0=254, x1=W - 428, y=oy + 13, h=28, inset=2, r_track=6, r_fill=4,
-             handle=(8, 24, 4), anchor_l=A("bl"), anchor_s=A("bottom"), bg=bg)
+             handle=(8, 24, 4), anchor_l=A("bl"), anchor_s=A("bottom"), bg=bg, mask_id=mask_id)
 
     L.button(art.icon_button("previous"), 20, oy + 13, "playlist.previous()", "Previous", anchor=A("bl"))
     L.toggle("vlc.isPlaying", art.accent_button("play", 54, 28), art.accent_button("pause", 54, 28),
-               "vlc.play()", "vlc.pause()", "Play", "Pause", x=58, y=oy + 13, anchor=A("bl"))
+             "vlc.play()", "vlc.pause()", "Play", "Pause", x=58, y=oy + 13, anchor=A("bl"))
     L.button(art.icon_button("next"), 120, oy + 13, "playlist.next()", "Next", anchor=A("bl"))
     L.text("$T", 170, base, 76, f16, t["text"], align="center", anchor=A("bl"), visible=ACTIVE)
 
     L.text("$D", W - 420, base, 76, f16, t["text"], align="center", anchor=A("br"), visible=ACTIVE)
     L.toggle("vlc.isMute", art.icon_button("volume"), art.icon_button("mute"), "vlc.mute()", "vlc.mute()",
-               "Mute", "Unmute", x=W - 327, y=oy + 13, anchor=A("br"))
+             "Mute", "Unmute", x=W - 327, y=oy + 13, anchor=A("br"))
     frames = art.get("volume.frames", lambda: P.volume_frames(t), on="chrome")
     L.slider("volume", W - 292, oy + 13, "(0,27),(87,27)", up=art.nothing(), w=88, h=28,
              tip="Volume: $V%", anchor=A("br"), background=(frames, 9, 10), hint="volume")
 
     L.toggle("eqwin.isVisible", art.icon_button("audio", 30, 32, 3, 4),
-               art.icon_button("audio", 30, 32, 3, 4, active=True), "eqwin.show()", "eqwin.hide()",
-               "Equalizer", "Hide equalizer", x=W - 184, y=oy + 11, anchor=A("br"))
+             art.icon_button("audio", 30, 32, 3, 4, active=True), "eqwin.show()", "eqwin.hide()",
+             "Equalizer", "Hide equalizer", x=W - 184, y=oy + 11, anchor=A("br"))
     L.button(art.icon_button("subtitles", 30, 32, 3, 4), W - 142, oy + 11, "dialogs.popup()",
              "Subtitles, tracks and the rest of VLC's menu", anchor=A("br"))
     L.button(art.icon_button("playback_settings", 30, 32, 3, 4), W - 100, oy + 11, "playback_menu.show()",
@@ -343,8 +356,8 @@ def repeat_controls(L, art, x, y, on):
         return P.text(img, 14, 18, "1", 9, t[color], weight="semibold", align="center")
     one = art.states("repeat1", one_draw, ((None, "accent"), ("hover_bg", "accent_hover"), ("down_bg", "accent_down")), on)
     L.toggle("playlist.isLoop", off, all_, "playlist.setLoop(true)", "playlist.setLoop(false);playlist.setRepeat(true)",
-               "Repeat all", "Repeat one", x=x, y=y, visible="not playlist.isRepeat")
-    L.button(one, x, y, "playlist.setRepeat(false)", "Repeat off", visible="playlist.isRepeat")
+             "Repeat all", "Repeat one", x=x, y=y, visible="not playlist.isRepeat")
+    L.button(one, x, y, "playlist.setRepeat(false);playlist.setLoop(false)", "Repeat off", visible="playlist.isRepeat")
 
 
 # Playlist rows (Figma sidebar list): ROW px tall, text in the "Inter Rows" font
@@ -383,8 +396,8 @@ def sidebar(L, art):
     L.image(art.px("panel"), x0, top, x1 - x0, bottom - top, anchor="left", resize="scale", hint="sbpanel")
     L.text("Playlist", 70, 79 - P.ascent(16, "semibold"), 200, L.skin.font(16, "semibold"), t["text_hi"])
     L.toggle("playlist.isRandom", art.icon_button("shuffle", 28, 28, 2, 2, on="panel"),
-               art.icon_button("shuffle", 28, 28, 2, 2, active=True, on="panel"), "playlist.setRandom(true)",
-               "playlist.setRandom(false)", "Shuffle", "Shuffle off", x=301, y=58)
+             art.icon_button("shuffle", 28, 28, 2, 2, active=True, on="panel"), "playlist.setRandom(true)",
+             "playlist.setRandom(false)", "Shuffle", "Shuffle off", x=301, y=58)
     repeat_controls(L, art, 339, 58, "panel")
     L.button(art.icon_button("open", 28, 28, 2, 2, on="panel"), 377, 58, "dialogs.playlist()",
              "Open VLC's playlist window")
@@ -434,7 +447,8 @@ def full_layout(skin, win, t, side):
             L.button(art.icon_button("lists", 30, 32, 3, 4), x, y,
                      f"main.setLayout({lid(t, 'side')})", "Show playlist", anchor=anchor)
     control_bar(L, art, H - 54, W, fixed=False, last=last,
-                bg=lambda x0, y0, x1, y1: P.solid(x1 - x0, y1 - y0, t["chrome"]))
+                bg=lambda x0, y0, x1, y1: P.solid(x1 - x0, y1 - y0, t["chrome"]),
+                mask_id=f"{t['name']}.main.seek.mask")
 
     # skins2 windows resize only from the right, the bottom and that corner
     chrome = art.px("chrome")
@@ -452,8 +466,8 @@ def mini_layout(skin, win, t):
     vx, vy, vw, vh = 8, 8, 375, 211
 
     bg_img = P.solid(W, H, t["border"])
-    bg_img.alpha_composite(P.rrect(W, H, (1, 1, W - 1, H - 1), 0, t["chrome"]))
-    bg_img.alpha_composite(P.rrect(W, H, (vx, vy, vx + vw, vy + vh), 6, t["stage"]))
+    bg_img.paste(P.solid(W - 2, H - 2, t["chrome"]), (1, 1))
+    bg_img.alpha_composite(P.rrect(vw, vh, (0, 0, vw, vh), 6, t["stage"]), (vx, vy))
     L.image(art.get("mini.bg", bg_img), 0, 0, action="move", hint="bg")
     L.image(art.px("stage"), vx, vy + 8, vw, vh - 16, resize="scale2", art=True, visible=ART_VIEW, hint="cover")
     L.video(vx, vy, vw, vh, anchor="tl", visible="vlc.hasVout")
@@ -468,12 +482,12 @@ def mini_layout(skin, win, t):
     y = 284
     L.button(art.icon_button("previous"), 8, y, "playlist.previous()", "Previous")
     L.toggle("vlc.isPlaying", art.accent_button("play", 46, 28), art.accent_button("pause", 46, 28),
-               "vlc.play()", "vlc.pause()", "Play", "Pause", x=40, y=y)
+             "vlc.play()", "vlc.pause()", "Play", "Pause", x=40, y=y)
     L.button(art.icon_button("next"), 88, y, "playlist.next()", "Next")
     f12 = L.skin.font(12)
     L.text("$T / $D", 126, y + 19 - P.ascent(12), 126, f12, t["text"], visible=ACTIVE)
     L.toggle("vlc.isMute", art.icon_button("volume"), art.icon_button("mute"), "vlc.mute()", "vlc.mute()",
-               "Mute", "Unmute", x=257, y=y)
+             "Mute", "Unmute", x=257, y=y)
     L.button(art.icon_button("lists"), 289, y, f"main.setLayout({lid(t, 'side')})", "Full player with playlist")
     L.button(art.icon_button("window"), 321, y, f"main.setLayout({lid(t, 'full')})", "Full player")
     L.button(art.icon_button("close"), 353, y, "vlc.quit()", "Quit VLC")
@@ -492,7 +506,8 @@ def toggle_images(art, on):
     def draw(state):
         img = P.rrect(64, 28, (0, 0, 64, 28), 6, t["track"])
         kx = 38 if state else 2
-        img.alpha_composite(P.rrect(64, 28, (kx, 2, kx + 24, 26), 4, t["accent" if state else "toggle_off_knob"]))
+        knob = P.rrect(24, 24, (0, 0, 24, 24), 4, t["accent" if state else "toggle_off_knob"])
+        img.alpha_composite(knob, (kx, 2))
         return P.text(img, 20 if state else 45, 18, "ON" if state else "OFF", 11,
                       t["accent" if state else "text_dim"], weight="semibold", align="center")
     off = art.get("toggle.off", lambda: draw(False), on, opaque=True)
@@ -512,17 +527,18 @@ def eq_layout(skin, win, t):
         (b, f"equalizer.band({i})", bands_top + i * row_h) for i, b in enumerate(BANDS)]
 
     bg_img = P.solid(W, H, t["border"])
-    bg_img.alpha_composite(P.rrect(W, H, (1, 1, W - 1, H - 1), 0, t["card_outer"]))
+    bg_img.paste(P.solid(W - 2, H - 2, t["card_outer"]), (1, 1))
     P.text(bg_img, 20, 34, "Equalizer", 16, t["text_hi"], weight="semibold")
-    bg_img.alpha_composite(P.rrect(W, H, (12, 56, W - 12, H - 12), 6, t["card"]))
+    bg_img.alpha_composite(P.rrect(W - 24, H - 68, (0, 0, W - 24, H - 68), 6, t["card"]), (12, 56))
     mid = (tx0 + tx1) // 2
     for label, x, align in (("−20 dB", tx0, "left"), ("0 dB", mid, "center"), ("+20 dB", tx1, "right")):
         P.text(bg_img, x, 80, label, 11, t["text_dim"], align=align)
-    bg_img.alpha_composite(P.rrect(W, H, (mid, 84, mid + 1, H - 22), 0, P.mix(t["card"], t["text_dim"], .45)))
+    bg_img.paste(P.solid(1, H - 106, P.mix(t["card"], t["text_dim"], .45)), (mid, 84))
+    track_pill = P.rrect(tx1 - tx0, 16, (0, 0, tx1 - tx0, 16), 4, t["track"])
     for label, _, y in rows:
         P.text(bg_img, 28, y + 22, label, 14, t["text"])
-        bg_img.alpha_composite(P.rrect(W, H, (tx0, y + 9, tx1, y + 25), 4, t["track"]))
-    bg_img.alpha_composite(P.rrect(W, H, (28, bands_top - 5, W - 28, bands_top - 4), 0, t["divider"]))
+        bg_img.alpha_composite(track_pill, (tx0, y + 9))
+    bg_img.paste(P.solid(W - 56, 1, t["divider"]), (28, bands_top - 5))
     L.image(art.get("eq.bg", bg_img), 0, 0, action="move", hint="bg")
 
     for label, value, y in rows:
@@ -533,7 +549,7 @@ def eq_layout(skin, win, t):
                  name="eq" + value.split(".")[1].replace("(", "").replace(")", ""))
     off, on = toggle_images(art, "card_outer")
     L.toggle("equalizer.isEnabled", off, on, "equalizer.enable()", "equalizer.disable()",
-               "Turn the equalizer on", "Turn the equalizer off", x=W - 20 - 36 - 10 - 64, y=14)
+             "Turn the equalizer on", "Turn the equalizer off", x=W - 20 - 36 - 10 - 64, y=14)
     L.button(art.window_button("close", on="card_outer"), W - 48, 16, "eqwin.hide()", "Close")
     return L
 
@@ -546,7 +562,7 @@ def fsc_layout(skin, win, t):
     L = Layout(skin, win, lid(t, "fsc"), W, H)
     art = Art(skin, t)
     bg_img = P.solid(W, H, t["border"])
-    bg_img.alpha_composite(P.rrect(W, H, (1, 1, W - 1, H - 1), 0, t["chrome"]))
+    bg_img.paste(P.solid(W - 2, H - 2, t["chrome"]), (1, 1))
     L.image(art.get("fsc.bg", bg_img), 0, 0, action="move", hint="bg")
 
     def last(x, y, anchor):
@@ -558,17 +574,17 @@ def fsc_layout(skin, win, t):
 
 # --- menus ----------------------------------------------------------------------
 
-def menus(skin):
+def menus(skin, fsc_id="fullscreenController"):
     """The '...' menu (Figma 'menu', 6062:13354) per layout, and the playback menu
     (Figma 'right-click menu', 6065:13616). Shortcuts shown are VLC's own hotkeys."""
     for t in THEMES:
         o = other(t)
-        for kind in ("full", "side", "mini"):
+        for kind in MAIN_KINDS:
             view = [("Hide Playlist" if kind == "side" else "Show Playlist",
                      f"main.setLayout({lid(t, 'full' if kind == 'side' else 'side')})"),
                     ("Full Player" if kind == "mini" else "Mini Player",
                      f"main.setLayout({lid(t, 'full' if kind == 'mini' else 'mini')})"),
-                    (f"{o['name'].title()} Theme", switch_theme(t, kind)),
+                    (f"{o['name'].title()} Theme", switch_theme(t, kind, fsc_id)),
                     ("Always on Top", "vlc.onTop()")]
             skin.menu(f"{lid(t, kind)}_menu", [
                 ("Open File(s)...", "dialogs.file()"),
@@ -609,51 +625,61 @@ def menus(skin):
 
 # --- build -------------------------------------------------------------------------
 
-MAIN_KINDS = ("full", "side", "mini")
-
-
 def build(start="dark_full", show_eq=False, preview_fsc=False):
     """start: the layout the main window opens with (VLC remembers the last one used
     after that). show_eq opens the equalizer too. preview_fsc renames the fullscreen
     controller so it opens as an ordinary window. The last two are for screenshots."""
+    all_layouts = [(t, k) for t in THEMES for k in MAIN_KINDS]
+    by_id = {lid(t, k): (t, k) for t, k in all_layouts}
+    if start not in by_id:
+        raise ValueError(f"Unknown start layout {start!r}; expected one of {tuple(by_id)}")
+
     if OUT.exists():
         shutil.rmtree(OUT)
-    rows = P.rows_font(Path(tempfile.mkdtemp()) / "InterRows-Regular.ttf", ROW_TEXT, ROW)
-    skin = Skin("VLC Redesign", "Design by Juxtopposed, skinned by build.py", OUT,
-                {**P.FONT_FILES, "rows": rows}, P.FONT_LICENSE,
-                webpage="https://github.com/mamogh/vlc-redesign-skin")
-    menus(skin)
 
-    # skins2 starts each window on the layout added last
-    start_t = DARK if start.startswith("dark") else LIGHT
-    main = skin.window("main", position="Center", dragdrop="true", playondrop="true")
-    order = [(t, k) for t in THEMES for k in MAIN_KINDS if lid(t, k) != start] + [(start_t, start.split("_")[1])]
-    for t, kind in order:
-        if kind == "mini":
-            mini_layout(skin, main, t)
-        else:
-            full_layout(skin, main, t, kind == "side")
-    eq = skin.window("eqwin", visible="true" if show_eq else "false", position="Center")
-    fsc = (skin.window("fscpreview", position="Center") if preview_fsc else
-           skin.window("fullscreenController", position="South", ymargin="3%"))
-    for t in (other(start_t), start_t):
-        eq_layout(skin, eq, t)
-        fsc_layout(skin, fsc, t)
+    fsc_id = "fscpreview" if preview_fsc else "fullscreenController"
 
-    skin.write()
+    with tempfile.TemporaryDirectory() as tmp:
+        rows = P.rows_font(Path(tmp) / "InterRows-Regular.ttf", ROW_TEXT, ROW)
+        skin = Skin("VLC Redesign", "Design by Juxtopposed, skinned by build.py", OUT,
+                    {**P.FONT_FILES, "rows": rows}, P.FONT_LICENSE,
+                    webpage="https://github.com/mamogh/vlc-redesign-skin")
+        menus(skin, fsc_id)
+
+        # skins2 starts each window on the layout added last
+        start_t, start_k = by_id[start]
+        main = skin.window("main", position="Center", dragdrop="true", playondrop="true")
+        order = [(t, k) for t, k in all_layouts if lid(t, k) != start] + [(start_t, start_k)]
+        for t, kind in order:
+            if kind == "mini":
+                mini_layout(skin, main, t)
+            else:
+                full_layout(skin, main, t, kind == "side")
+        eq = skin.window("eqwin", visible="true" if show_eq else "false", position="Center")
+        fsc = (skin.window(fsc_id, position="Center") if preview_fsc else
+               skin.window(fsc_id, position="South", ymargin="3%"))
+        for t in (other(start_t), start_t):
+            eq_layout(skin, eq, t)
+            fsc_layout(skin, fsc, t)
+
+        skin.write()
+
     problems = check_theme.check(OUT / "theme.xml")
     if problems:
         raise SystemExit("theme.xml has problems:\n  " + "\n  ".join(problems))
     vlt = DIST / f"{NAME}.vlt"
+
     # dist/ is committed, so the archive is made byte-for-byte reproducible: no timestamps,
-    # owners or ordering that change from build to build
+    # permissions, owners or ordering that change from build to build
     def plain(info):
         info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+        info.mode = 0o755 if info.isdir() else 0o644
         return info
+
     with open(vlt, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz, \
             tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         tar.add(OUT, arcname=NAME, recursive=False, filter=plain)
-        for path in sorted(OUT.rglob("*")):
+        for path in sorted(OUT.rglob("*"), key=lambda p: p.relative_to(OUT).as_posix()):
             tar.add(path, arcname=f"{NAME}/{path.relative_to(OUT).as_posix()}", recursive=False, filter=plain)
     images = len(list((OUT / "img").glob("*.png")))
     print(f"{OUT / 'theme.xml'}: {images} images")
