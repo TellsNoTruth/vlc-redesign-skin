@@ -38,15 +38,21 @@ BOOLS = {
     "vlc.hasVout", "vlc.hasAudio", "vlc.isMute", "equalizer.isEnabled", "vlc.isOnTop",
 }
 PERCENTS = {"time", "volume", "equalizer.preamp", "playtree.slider", *(f"equalizer.band({i})" for i in range(10))}
-TOKENS = set("HTtLlDdVNFBSR")          # utils/var_text.cpp: $H $T $t ...
+TOKENS = set("HTtLlDdVNFBSR$")          # utils/var_text.cpp: $H$T $t ... ($$escapes$)
 IMAGE_ACTIONS = {"none", "move", "resizeE", "resizeS", "resizeSE"}   # an Image's `action`
 IMAGE_ATTRS = ("image", "up", "down", "over", "up1", "down1", "over1", "up2", "down2", "over2",
                "bgimage", "itemimage", "openimage", "closedimage")
-
+BOUNDED_CONTROLS = {"Image", "Button", "Checkbox", "Text", "Video", "Playtree"}
 
 # VLC's own definition of the format; VideoLAN's skin guide says a skin that breaks it may
-# not load. Checked when VLC is installed in the usual place.
-VLC_DTD = Path(r"C:\Program Files\VideoLAN\VLC\skins\skin.dtd")
+# not load. Checked when VLC is installed in the usual place on Windows or Linux.
+_DTD_CANDIDATES = (
+    Path(r"C:\Program Files\VideoLAN\VLC\skins\skin.dtd"),
+    Path(r"C:\Program Files (x86)\VideoLAN\VLC\skins\skin.dtd"),
+    Path("/usr/share/vlc/skins2/skin.dtd"),
+    Path("/usr/local/share/vlc/skins2/skin.dtd"),
+)
+VLC_DTD = next((p for p in _DTD_CANDIDATES if p.exists()), _DTD_CANDIDATES[0])
 
 
 def dtd_problems(root, dtd_path=VLC_DTD, theme_path=None):
@@ -64,26 +70,34 @@ def dtd_problems(root, dtd_path=VLC_DTD, theme_path=None):
         if dtd.validate(etree.parse(str(theme_path))):
             return []
         return sorted({f"DTD: line {e.line}: {e.message}" for e in dtd.error_log.filter_from_errors()})
+
     text = re.sub(r"<!--.*?-->", "", dtd_path.read_text(encoding="utf-8"), flags=re.S)
-    children = {name: set(re.findall(r"[A-Za-z]\w*", spec)) - {"EMPTY"}
+    children = {name: set(re.findall(r"[A-Za-z]\w*", spec)) - {"EMPTY", "PCDATA", "ANY"}
                 for name, spec in re.findall(r"<!ELEMENT\s+(\w+)\s+(.*?)>", text, re.S)}
-    attrs = {name: dict(re.findall(r'(\w+)\s+CDATA\s+(#REQUIRED|#IMPLIED|"[^"]*")', body))
-             for name, body in re.findall(r"<!ATTLIST\s+(\w+)(.*?)>", text, re.S)}
-    problems = []
-    for parent in root.iter():
-        for el in parent:
-            if el.tag not in children.get(parent.tag, ()):
-                problems.append(f"DTD: <{el.tag}> is not allowed inside <{parent.tag}>")
+    attrs = {}
+    for name, body in re.findall(r"<!ATTLIST\s+(\w+)(.*?)>", text, re.S):
+        el_attrs = attrs.setdefault(name, {})
+        for attr, default in re.findall(
+            r'(\w+)\s+(?:CDATA|ID|IDREF|IDREFS|\([^)]*\))\s+(#REQUIRED|#IMPLIED|(?:#FIXED\s+)?"[^"]*"|(?:#FIXED\s+)?\'[^\']*\')',
+            body,
+        ):
+            el_attrs[attr] = default
+
+    problems = set()
     for el in root.iter():
+        allowed_children = children.get(el.tag, ())
+        for child in el:
+            if child.tag not in allowed_children:
+                problems.add(f"DTD: <{child.tag}> is not allowed inside <{el.tag}>")
         declared = attrs.get(el.tag, {})
         where = f"DTD: <{el.tag} id={el.get('id')!r}>"
         for a in el.attrib:
             if a not in declared:
-                problems.append(f"{where} has undeclared attribute {a}")
+                problems.add(f"{where} has undeclared attribute {a}")
         for a, default in declared.items():
             if default == "#REQUIRED" and a not in el.attrib:
-                problems.append(f"{where} lacks required attribute {a}")
-    return sorted(set(problems))
+                problems.add(f"{where} lacks required attribute {a}")
+    return sorted(problems)
 
 
 def check(theme_path):
@@ -97,39 +111,52 @@ def check(theme_path):
     for el in root.iter():
         kind = {"Bitmap": "bitmap", "SubBitmap": "bitmap", "Font": "font", "Window": "window",
                 "Layout": "layout", "PopupMenu": "popup"}.get(el.tag, "control")
-        if el.get("id") and el.tag not in ("ThemeInfo", "SliderBackground"):
-            key = (kind, el.get("id"))
+        el_id = el.get("id")
+        if el_id and el.tag not in ("ThemeInfo", "SliderBackground"):
+            key = (kind, el_id)
             if key in seen:
-                err(f"{kind} id {el.get('id')} is used twice")
+                err(f"{kind} id {el_id} is used twice")
             seen[key] = el
 
     bitmaps = {}
     for b in root.iter("Bitmap"):
-        sheet = Image.open(theme_path.parent / b.get("file"))
-        bitmaps[b.get("id")] = sheet.size
+        bmp_id, bmp_file = b.get("id"), b.get("file")
+        bmp_path = theme_path.parent / bmp_file if bmp_file else None
+        if not bmp_path or not bmp_path.is_file():
+            err(f"bitmap {bmp_id}: missing file {bmp_file}")
+            continue
+        with Image.open(bmp_path) as sheet:
+            sw, sh = sheet.size
+        bitmaps[bmp_id] = (sw, sh)
         for sb in b.iter("SubBitmap"):
-            x, y, w, h = (int(sb.get(k)) for k in ("x", "y", "width", "height"))
-            if x + w > sheet.width or y + h > sheet.height:
-                err(f"SubBitmap {sb.get('id')} lies outside {b.get('file')}")
-            if sb.get("id") in bitmaps:
-                err(f"bitmap id {sb.get('id')} defined twice")
+            x, y, w, h = (int(sb.get(k, 0)) for k in ("x", "y", "width", "height"))
+            if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > sw or y + h > sh:
+                err(f"SubBitmap {sb.get('id')} lies outside {bmp_file}")
             bitmaps[sb.get("id")] = (w, h)
-    fonts = {f.get("id") for f in root.iter("Font")}
+
+    fonts = {"defaultfont"} | {f.get("id") for f in root.iter("Font") if f.get("id")}
     for f in root.iter("Font"):
-        if not (theme_path.parent / f.get("file")).exists():
-            err(f"font {f.get('id')}: missing file {f.get('file')}")
-    popups = {p.get("id") for p in root.iter("PopupMenu")}
-    windows = {w.get("id"): {l.get("id") for l in w.iter("Layout")} for w in root.iter("Window")}
+        font_file = f.get("file")
+        if not font_file or not (theme_path.parent / font_file).is_file():
+            err(f"font {f.get('id')}: missing file {font_file}")
+
+    popups = {p.get("id") for p in root.iter("PopupMenu") if p.get("id")}
+    windows = {w.get("id"): {l.get("id") for l in w.iter("Layout") if l.get("id")}
+               for w in root.iter("Window") if w.get("id")}
     layouts = {l for ls in windows.values() for l in ls}
-    bools = BOOLS | {f"{w}.isVisible" for w in windows} | {f"{w}.isMaximized" for w in windows} \
-        | {f"{l}.isActive" for l in layouts}
+    bools = (BOOLS
+             | {f"{w}.isVisible" for w in windows}
+             | {f"{w}.isMaximized" for w in windows}
+             | {f"{l}.isActive" for l in layouts})
 
     def action_ok(action):
+        if not action or not action.strip():
+            return False
         for part in (p.strip() for p in action.split(";")):
             if part in COMMANDS:
                 continue
             m = re.fullmatch(r"(\w+)\.(show|hide|maximize|unmaximize)\(\)", part)
-            if m and (m.group(1) in windows or (m.group(2) == "show" and m.group(1) in popups)):
+            if m and (m.group(1) in windows or (m.group(2) in ("show", "hide") and m.group(1) in popups)):
                 continue
             m = re.fullmatch(r"(\w+)\.setLayout\((\w+)\)", part)
             if m and m.group(1) in windows and m.group(2) in windows[m.group(1)]:
@@ -138,19 +165,40 @@ def check(theme_path):
         return True
 
     def bool_ok(expr):
-        return all(w in ("and", "or", "not") or w in bools for w in expr.split())
+        tokens = re.findall(r"\(\vert{}\)|[^\s()]+", expr or "")
+        if not tokens:
+            return False
+        depth = 0
+        expect_operand = True
+        for tok in tokens:
+            if expect_operand:
+                if tok == "(":
+                    depth += 1
+                elif tok == "not":
+                    continue
+                elif tok in bools:
+                    expect_operand = False
+                else:
+                    return False
+            else:
+                if tok == ")":
+                    depth -= 1
+                    if depth < 0:
+                        return False
+                elif tok in ("and", "or"):
+                    expect_operand = True
+                else:
+                    return False
+        return not expect_operand and depth == 0
 
     for win in root.iter("Window"):
         for layout in win.iter("Layout"):
-            lw, lh = int(layout.get("width")), int(layout.get("height"))
-            ids = set()
+            lw, lh = int(layout.get("width", 0)), int(layout.get("height", 0))
+            in_panel = {child for p in layout.iter("Panel") for child in p.iter() if child is not p}
             for el in layout.iter():
                 if el is layout:
                     continue
                 where = f"{layout.get('id')}/{el.tag} {el.get('id')}"
-                if el.get("id") in ids:
-                    err(f"{where}: id used twice in the layout")
-                ids.add(el.get("id"))
                 for attr in IMAGE_ATTRS:
                     v = el.get(attr)
                     if v and v != "none" and v not in bitmaps:
@@ -173,28 +221,33 @@ def check(theme_path):
                     err(f"{where}: unknown slider value '{el.get('value')}'")
                 if el.tag == "SliderBackground":
                     w, h = bitmaps.get(el.get("image"), (0, 0))
-                    if w % int(el.get("nbhoriz")) or h % int(el.get("nbvert")):
-                        err(f"{where}: {w}x{h} frames do not divide into {el.get('nbhoriz')} x {el.get('nbvert')}")
-                for tok in re.findall(r"\$(.)", el.get("text", "") + el.get("tooltiptext", "")):
-                    if tok not in TOKENS:
-                        err(f"{where}: unknown text token ${tok}")
+                    nbh, nbv = int(el.get("nbhoriz", 1)), int(el.get("nbvert", 1))
+                    ph, pv = int(el.get("padhoriz", 0)), int(el.get("padvert", 0))
+                    fw, fh = w - (nbh - 1) * ph, h - (nbv - 1) * pv
+                    if w and h and (nbh <= 0 or nbv <= 0 or fw <= 0 or fh <= 0 or fw % nbh or fh % nbv):
+                        err(f"{where}: {w}x{h} frames do not divide into {nbh} x {nbv}")
+                for attr in ("text", "tooltiptext", "help"):
+                    val = el.get(attr, "")
+                    for tok in re.findall(r"\$(.|)", val, re.S):
+                        if tok not in TOKENS:
+                            err(f"{where}: unknown text token ${tok}")
                 # the control's default rectangle must lie inside the layout
-                if el.tag in ("Image", "Button", "Checkbox", "Text", "Video", "Playtree") \
-                        and el.get("x") and not _inside_panel(layout, el):
-                    x, y = int(el.get("x")), int(el.get("y"))
-                    w = int(el.get("width") or 0) or bitmaps.get(el.get("image") or el.get("up") or el.get("up1"), (0, 0))[0]
-                    h = int(el.get("height") or 0) or bitmaps.get(el.get("image") or el.get("up") or el.get("up1"), (0, 0))[1]
+                if el.tag in BOUNDED_CONTROLS and el not in in_panel:
+                    x, y = int(el.get("x", 0)), int(el.get("y", 0))
+                    bmp_w, bmp_h = bitmaps.get(el.get("image") or el.get("up") or el.get("up1"), (0, 0))
+                    w = int(el.get("width") or 0) or bmp_w
+                    h = int(el.get("height") or 0) or bmp_h
                     if x < 0 or y < 0 or x + w > lw or y + h > lh:
                         err(f"{where}: {w}x{h} at {x},{y} falls outside the {lw}x{lh} layout")
     for item in root.iter("MenuItem"):
-        if not action_ok(item.get("action")):
+        if not action_ok(item.get("action", "")):
             err(f"menu item '{item.get('label')}': unknown action '{item.get('action')}'")
     return errors
 
 
 def _inside_panel(layout, el):
     """Controls in a Panel are positioned relative to it, so the layout bounds check skips them."""
-    return any(el in list(p.iter()) and el is not p for p in layout.iter("Panel"))
+    return any(el in p.iter() and el is not p for p in layout.iter("Panel"))
 
 
 if __name__ == "__main__":
